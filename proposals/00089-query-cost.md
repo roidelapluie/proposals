@@ -25,7 +25,7 @@ Operators want ceilings they can tune without a restart. Users and tools (Grafan
 ### Pitfalls of the current solution
 
 * The existing limits are set at startup. Changing them means a restart.
-* They are global. A single tenant or dashboard cannot be given a tighter budget.
+* They are global. A single dashboard, query,  cannot be given a tighter budget.
 * There is no pre-execution estimate. The only way to learn a query's cost today is to run it, which is exactly what we want to avoid for the expensive ones.
 * `--query.max-samples` measures peak in-memory samples, which does not map cleanly to "how much index and how many samples did this touch".
 
@@ -40,7 +40,7 @@ Operators want ceilings they can tune without a restart. Users and tools (Grafan
 
 ### Audience
 
-Operators running shared Prometheus servers, and UI/tooling authors (Grafana, recording rules) that build queries on a user's behalf.
+Operators running shared Prometheus servers, and UI/tooling authors (Grafana) that build queries on a user's behalf.
 
 ## Non-Goals
 
@@ -54,7 +54,16 @@ Operators running shared Prometheus servers, and UI/tooling authors (Grafana, re
 
 Three pieces, all gated by `--enable-feature=query-cost`.
 
-**1. Estimation (`promql.EstimateCost`).** Parse the query, walk it for every vector and matrix selector, compute the effective time window each selector reads (mirroring the engine's `getTimeRangesForSelector`/`populateSeries`), and ask storage for the series count per selector via a single querier over the union window. `SeriesTouched` is the sum across selectors — an upper bound, because a series shared between selectors is counted once per selector. `SamplesScanned` models the engine's incremental per-step reads (full range window at step 0, then only the samples that advance past the previous cutoff), scaled by a measured average per-point cost so native-histogram points are sized by bucket rather than counted as one float unit. The estimate is index-only apart from decoding at most `histogramSampleLimit` (50) points per selector to size histograms.
+**1. Estimation (`promql.EstimateCost`).** Parse the query, walk it for every vector and matrix selector, compute the effective time window each selector reads (mirroring the engine's `getTimeRangesForSelector`/`populateSeries`), and ask storage for the series count per selector via a single querier over the union window. `SeriesTouched` is the sum across selectors — an upper bound, because a series shared between selectors is counted once per selector. `SamplesScanned` models the engine's incremental per-step reads (full range window at step 0, then only the samples that advance past the previous cutoff), scaled by a measured average per-point cost so native-histogram points are sized by bucket rather than counted as one float unit. The estimate is index-only apart from decoding at most 50 (like `histogramSampleLimit`) points per selector.
+
+`SamplesScanned` is intended to approximate the *samples read* statistic introduced in [prometheus/prometheus#18081](https://github.com/prometheus/prometheus/pull/18081) — the total samples the engine reads from storage — not the older *total samples* (peak in-memory) statistic. Series with no in-window samples still count, so the figure stays an upper bound.
+
+The per-point density can be derived two ways:
+
+* **Scrape-interval (fallback, index-only).** Assume samples land at the global scrape interval and compute window ÷ interval. Cheapest, but wrong for series scraped at a different interval and for remote-written series, which have no scrape interval at all. Used only when nothing can be sampled (see below).
+* **Chunk sampling (always-on, not opt-in).** The estimator samples automatically, with no user-facing knob, whenever the storage exposes `storage.ChunkQueryable`: it reads up to a fixed `chunkSampleLimit` (50) chunks' `NumSamples` header to measure the selector's real sample interval, and decodes the first point of up to a fixed `histogramSampleLimit` (50) series to size native-histogram points by bucket count. Reading a chunk header is far cheaper than decoding its samples, so this stays much cheaper than executing the query.
+
+Sampling prefers the *real* query window over a nearby proxy window whenever that real window is cheap enough: if a selector's actual chunk count (for density) or series count (for point cost) already fits within the 50-item budget, the estimator samples directly from `[sel.mint, sel.maxt]` and gets an exact rather than extrapolated measurement. Only when the real window has more chunks/series than the budget affords does it fall back to sampling a bounded, narrow window near the query's end and extrapolating.
 
 **2. API.** Two new endpoints estimate cost without executing:
 
@@ -74,7 +83,7 @@ They take the same parameters as `/api/v1/query` and `/api/v1/query_range` and r
 }
 ```
 
-The instant and range endpoints also gain a `cost` parameter. When set, the response `data` carries an estimated-vs-actual comparison:
+The instant and range endpoints also gain a `cost=true` boolean parameter. When set, the response `data` carries an estimated-vs-actual comparison:
 
 ```json
 "cost": {
@@ -83,7 +92,7 @@ The instant and range endpoints also gain a `cost` parameter. When set, the resp
 }
 ```
 
-Note: `cost=1` adds a second index lookup on top of executing the query.
+`cost` is a plain on/off switch, not a set of levels: `cost=true` (any non-bool value errors) enables the comparison. There is no separate opt-in for chunk sampling, because chunk-metadata sampling always runs automatically wherever the storage supports it (see How, section 1).
 
 **3. Limits.** Three reloadable knobs under `global:`:
 
@@ -94,7 +103,9 @@ global:
   query_max_duration: 0s
 ```
 
-These are enforced *during* execution against the query's actual running cost, not against the estimate: a query is rejected as soon as it loads too many series or scans too many samples, and `query_max_duration` surfaces as a query timeout. A client may lower any ceiling for a single request via `max_series`, `max_samples_scanned`, `max_query_duration`; these can only tighten, never loosen, the operator-set value. The estimate is never used to reject a query — enforcement is always on the real cost.
+These are enforced *during* execution against the query's actual running cost, not against the estimate: a query is rejected as soon as it loads too many series or scans too many samples, and `query_max_duration` surfaces as a query timeout. A client may lower any ceiling for a single request via `max_series`, `max_samples_scanned`, `max_query_duration`. These can only tighten, never loosen, the operator-set value: a request that asks for a value above the server ceiling is silently clamped down to that ceiling, with no error, rather than rejected. The estimate is never used to reject a query — enforcement is always on the real cost.
+
+`query_max_duration` overlaps with the existing `-query.timeout` flag and `timeout` URL parameter, and is the reloadable, config-file equivalent of the former. To avoid two ways of doing the same thing, once `query_max_duration` proves out we propose to deprecate the `-query.timeout` *flag* in its favour. The per-query `timeout` URL parameter is retained and behaves like the other per-query overrides: it can only lower the effective ceiling, not raise it above `query_max_duration`.
 
 ### Testing and verification
 
@@ -105,29 +116,26 @@ These are enforced *during* execution against the query's actual running cost, n
 
 ### Migration
 
-Purely additive and behind a feature flag. Default config (all limits `0`) changes no behaviour. Nothing to migrate.
+Purely additive and behind a feature flag. Default config (all limits `0`) changes no behaviour.
 
 ### Known unknowns
 
-* **Estimate accuracy.** `SeriesTouched` over-counts shared series and series with no in-window samples; `SamplesScanned` assumes samples land exactly at the scrape interval and that sampled series are representative. Is an upper bound the right contract, or do we want something tighter?
-* **Scrape interval.** The estimator uses the global scrape interval; per-target intervals are not modelled.
+* **Estimate accuracy.** `SeriesTouched` still over-counts shared series and series with no in-window samples; `SamplesScanned` assumes samples land exactly at the measured or scrape interval and that sampled series are representative. Partially resolved when a selector's real window fits within the 50-chunk/50-series sample budget, the measurement is now taken from that real window instead of extrapolated from a nearby proxy window, so small selectors get an exact rather than approximate density (see How, section 1). Larger selectors still extrapolate from a bounded sample. Is an upper bound the right contract for those, or do we want something tighter?
+* **Scrape interval.** Mostly resolved for TSDB-backed storage: the estimator measures the real density from chunk metadata automatically whenever it's available, with no configuration needed. The caller-supplied scrape interval remains a fallback only for a plain `storage.Queryable` with no chunk metadata (e.g. some remote-read backends), or when a selector's window has nothing to sample.
+* **Sampling representativeness.** The sample budget is a fixed internal constant (50 chunks / 50 series), not a configurable knob. Which chunks/series to sample when a selector's real window doesn't fit the budget (the first ones returned by `Select` over a narrow window near the query's end) is an open question for large selectors — a poorly chosen sample could skew the extrapolation.
 * **Subqueries.** Only one level of nesting is modelled exactly.
-* **Lookback delta.** The storage-only estimator uses the package default, not the engine's configured value.
-* **Agent mode.** Estimation is unavailable (no queryable index).
 * **Config surface.** Should limits live under `global:`, or a dedicated `query:` section?
+* **Units** Is it enough to return number of samples/series or do we want to return bytes?
 
 ## Alternatives
 
 1. **Estimate from postings cardinality directly, bypassing `storage.Querier`.** Cheaper, but ties the estimator to the TSDB index and breaks for any other `storage.Queryable` (remote read, federation). Using the portable `Select` path keeps it storage-agnostic.
-2. **Reject queries based on the estimate.** Rejected: the estimate is an upper bound and can be wrong in both directions. Rejecting on an estimate would refuse queries that would actually run fine. Enforcement is on real cost; the estimate is advisory only.
+2. **Reject queries based on the estimate.** Rejected as the default: the estimate is an upper bound and can be wrong in both directions, so rejecting on it would refuse queries that would actually run fine. Enforcement is on real cost; the estimate is advisory only. There is a fair argument that letting a query that will almost certainly be limited run and fetch data anyway is wasteful. If the estimate proves accurate enough in practice (validated via the `cost` object's estimated-vs-actual comparison), an *opt-in* upfront rejection — reject before execution when the estimate clearly exceeds a ceiling — could be added later as a follow-up without changing the real-cost enforcement that remains the backstop.
 3. **Reuse `--query.max-samples` and friends.** They are start-time flags measuring peak in-memory samples, not reloadable and not per-query. Extending them to be reloadable and per-query would overload their meaning; new, clearly-scoped knobs are cleaner.
 4. **Do nothing / client-side estimation.** Clients cannot cheaply see the server's index cardinality, so any client-side guess is worse than a server estimate.
 
 ## Action Plan
 
-* [ ] `promql.EstimateCost` and the sample-unit cost model
-* [ ] `/api/v1/query_cost` and `/api/v1/query_range_cost` endpoints
-* [ ] `cost` parameter on instant/range queries (estimated vs actual)
-* [ ] Reloadable `query_max_series` / `query_max_samples_scanned` / `query_max_duration` under `global:`
-* [ ] Per-query lowering via `max_series` / `max_samples_scanned` / `max_query_duration`
-* [ ] `query-cost` feature flag, docs, OpenAPI spec, UI surfacing
+- Implementation of the API endpoints
+- Take feedback from the endpoint
+- Work on enforcement / accuracy
