@@ -31,7 +31,7 @@ Operators want ceilings they can tune without a restart. Users and tools (Grafan
 
 ## Goals
 
-* Give a cheap, index-based cost *estimate* (series touched, samples scanned) without executing the query.
+* Give a cheap cost *estimate* (series touched, samples scanned) without executing the query fully.
 * Expose the estimate through a new API so clients can gauge cost before running a query.
 * Add reloadable cost limits (`query_max_series`, `query_max_samples_scanned`, `query_max_duration`) enforced during execution.
 * Let a client *lower* those ceilings per query, never raise them.
@@ -103,9 +103,9 @@ global:
   query_max_duration: 0s
 ```
 
-These are enforced *during* execution against the query's actual running cost, not against the estimate: a query is rejected as soon as it loads too many series or scans too many samples, and `query_max_duration` surfaces as a query timeout. A client may lower any ceiling for a single request via `max_series`, `max_samples_scanned`, `max_query_duration`. These can only tighten, never loosen, the operator-set value: a request that asks for a value above the server ceiling is silently clamped down to that ceiling, with no error, rather than rejected. The estimate is never used to reject a query — enforcement is always on the real cost.
+These are enforced *during* execution against the query's actual running cost, not against the estimate: a query is rejected as soon as it loads too many series or scans too many samples, and `query_max_duration` surfaces as a query timeout. A client may lower any ceiling for a single request via `max_series`, `max_samples_scanned`, `max_query_duration`. These can only tighten, never loosen, the operator-set value: a request that asks for a value above the server ceiling is rejected, making it clear to the caller that the requested limit was not applied, rather than being silently clamped down. The estimate is never used to reject a query — enforcement is always on the real cost.
 
-`query_max_duration` overlaps with the existing `-query.timeout` flag and `timeout` URL parameter, and is the reloadable, config-file equivalent of the former. To avoid two ways of doing the same thing, once `query_max_duration` proves out we propose to deprecate the `-query.timeout` *flag* in its favour. The per-query `timeout` URL parameter is retained and behaves like the other per-query overrides: it can only lower the effective ceiling, not raise it above `query_max_duration`.
+`query_max_duration` is a normalization of the existing `-query.timeout` flag and `timeout` URL parameter, not a new concept: same semantics, but reloadable and config-file based. To avoid two ways of doing the same thing, the `-query.timeout` *flag* will be deprecated in favour of `query_max_duration`. The per-query `timeout` URL parameter is retained and behaves like the other per-query overrides: it can only lower the effective ceiling, not raise it above `query_max_duration`.
 
 ### Testing and verification
 
