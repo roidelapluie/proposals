@@ -25,7 +25,7 @@ Operators want ceilings they can tune without a restart. Users and tools (Grafan
 ### Pitfalls of the current solution
 
 * The existing limits are set at startup. Changing them means a restart.
-* They are global. A single dashboard, query,  cannot be given a tighter budget.
+* They are global. A single dashboard or query cannot be given a tighter budget.
 * There is no pre-execution estimate. The only way to learn a query's cost today is to run it, which is exactly what we want to avoid for the expensive ones.
 * `--query.max-samples` measures peak in-memory samples, which does not map cleanly to "how much index and how many samples did this touch".
 
