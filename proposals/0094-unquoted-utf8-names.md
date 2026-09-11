@@ -105,7 +105,7 @@ Names retain their exact identity. Parsing does not normalize Unicode, fold case
 
 For example, Latin `a` (U+0061) and Cyrillic `а` (U+0430) remain distinct. Both become usable without quoting. Similarly, precomposed `ö` is a letter, while an `o` followed by a combining diaeresis contains a combining mark and still requires quoting. These spellings remain distinct names.
 
-Lookalike names are already possible with quoted UTF-8 syntax. Removing quotes can make the distinction less apparent, so documentation should explain it. Editors or linting tools could expose code points or warn about confusing names. Whether to add such tooling is an open question; this proposal does not require runtime checks or a new PromQL function.
+Lookalike names are already possible with quoted UTF-8 syntax. Removing quotes can make the distinction less apparent, so documentation should explain it. Optional editor or linting diagnostics that expose code points or warn about lookalike characters are left for future work.
 
 ### Compatibility and implementation
 
