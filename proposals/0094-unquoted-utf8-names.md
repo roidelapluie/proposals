@@ -111,7 +111,7 @@ Lookalike names are already possible with quoted UTF-8 syntax. Removing quotes c
 
 Existing quoted queries remain valid. Quoted and unquoted references to the same name must produce the same selector and results. No stored data migration is needed.
 
-Update the Go lexer and parser, the web editor grammar and completion logic, and the expression printer consistently. Keep an ASCII fast path and use Unicode letter classification for non-ASCII runes. Implementations must agree on the Unicode version used to classify letters; upgrades to those tables need coordinated compatibility coverage.
+Update the Go lexer and parser, the web editor grammar and completion logic, and the expression printer consistently. Keep an ASCII fast path and use Go's `unicode.IsLetter` for non-ASCII runes. Unicode classification follows the `unicode` package bundled with the Go version used to build Prometheus.
 
 Query generators can emit the new syntax when their target supports it. Older parsers will reject the new unquoted names, so quoted syntax remains the compatible representation for those targets. String arguments that contain label names remain string arguments.
 
@@ -122,11 +122,6 @@ Query generators can emit the new syntax when their target supports it. Older pa
 * Verify that lookalike letters and differently encoded names remain distinct, and that dotted names never trigger metadata or histogram operations.
 * Check numeric literals, durations, keywords, operators, and subqueries for lexer regressions, including names such as `rate.total` and `Inf.total`.
 * Check parse/print/parse round trips and agreement between the Go parser and web editor grammar; benchmark ASCII and Unicode parsing.
-
-### Open questions
-
-* Which Unicode version should the initial implementation target, and how should other PromQL implementations track updates?
-* Should optional editor or linting diagnostics for lookalike characters accompany the change?
 
 ## Alternatives
 
