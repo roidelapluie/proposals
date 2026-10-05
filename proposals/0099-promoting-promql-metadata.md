@@ -71,11 +71,17 @@ Example output: `foo{host="bar",resource.power.status="down"}`
 
 `foo{~~resource[power.status]=~"down|stopped"}`
 
-6. Native metadata can be aliased with the `as` keyword.
+6. Native metadata can be aliased with the `as` keyword, only in metric label selectors (`{}`).
 
-`foo and on (~resource.power.status as power_status) bar`
+`foo{~resource.power.status="down" as power_status}`
 
-In this case, the metadata will be promoted on the left, on the right, or on both sides.
+7. Native metadata must not be used directly in binary operator matchers (`on` or `ignoring`).
+
+For example, `foo and on (~resource.power.status) bar` is invalid.
+
+Implicitly promoting metadata on the left, on the right, or on both sides during vector matching is likely to create duplicate metrics with the same output label set. Metadata must be promoted in metric label selectors before the resulting labels can be used in binary operator matchers.
+
+8. Promoting metadata must return an error if it creates duplicate label names, including when an alias conflicts with an existing label.
 
 Query results:
 
