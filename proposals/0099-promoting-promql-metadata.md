@@ -79,7 +79,8 @@ Example output: `foo{host="bar",resource.power.status="down"}`
 
 For example, `foo and on (~resource.power.status) bar` is invalid.
 
-Implicitly promoting metadata on the left, on the right, or on both sides during vector matching is likely to create duplicate metrics with the same output label set. Metadata must be promoted in metric label selectors before the resulting labels can be used in binary operator matchers.
+Implicitly promoting metadata during vector matching is likely to create duplicate metrics with the same output label set, therefore it's best to go with explicit promotion before matching.
+
 
 8. Promoting metadata must return an error if it creates duplicate label names, including when an alias conflicts with an existing label.
 
